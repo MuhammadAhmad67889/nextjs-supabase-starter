@@ -49,9 +49,24 @@ function checkoutRequest(body: unknown, token?: string) {
   });
 }
 
+// Sends a raw body string, so the test can send malformed JSON.
+function rawCheckoutRequest(rawBody: string, token?: string) {
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+  };
+  if (token) headers.Authorization = `Bearer ${token}`;
+  return new Request("http://localhost:3000/api/checkout", {
+    method: "POST",
+    headers,
+    body: rawBody,
+  });
+}
+
 describe("POST /api/checkout", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    // The route only allows the price the app is configured to sell.
+    process.env.NEXT_PUBLIC_STRIPE_PRICE_ID = "price_123";
   });
 
   it("returns 401 when no authorization header is sent", async () => {
@@ -132,6 +147,65 @@ describe("POST /api/checkout", () => {
 
     expect(res.status).toBe(400);
     expect(getStripe).not.toHaveBeenCalled();
+  });
+
+  it("returns 400 when priceId is not the configured plan price", async () => {
+    const { admin } = makeAdmin({
+      data: { user: sessionUser },
+      error: null,
+    });
+    vi.mocked(getSupabaseAdmin).mockReturnValue(admin as never);
+    const { create, client } = makeStripe();
+    vi.mocked(getStripe).mockReturnValue(client as never);
+
+    const res = await POST(
+      checkoutRequest({ priceId: "price_someone_elses_plan" }, "good-token")
+    );
+
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual(
+      expect.objectContaining({ error: expect.any(String) })
+    );
+    // No Stripe session is created for a price we do not sell.
+    expect(create).not.toHaveBeenCalled();
+  });
+
+  it("returns 400 when the body is not valid JSON", async () => {
+    const { admin } = makeAdmin({
+      data: { user: sessionUser },
+      error: null,
+    });
+    vi.mocked(getSupabaseAdmin).mockReturnValue(admin as never);
+
+    const res = await POST(rawCheckoutRequest("{not json", "good-token"));
+
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual(
+      expect.objectContaining({ error: "Invalid JSON body" })
+    );
+    expect(getStripe).not.toHaveBeenCalled();
+  });
+
+  it("returns a generic 500 without leaking internals when Stripe fails", async () => {
+    const { admin } = makeAdmin({
+      data: { user: sessionUser },
+      error: null,
+    });
+    vi.mocked(getSupabaseAdmin).mockReturnValue(admin as never);
+    const create = vi.fn(async () => {
+      throw new Error("Stripe secret key is wrong");
+    });
+    const client = { checkout: { sessions: { create } } };
+    vi.mocked(getStripe).mockReturnValue(client as never);
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const res = await POST(
+      checkoutRequest({ priceId: "price_123" }, "good-token")
+    );
+
+    expect(res.status).toBe(500);
+    expect(await res.json()).toEqual({ error: "Checkout failed" });
+    errorSpy.mockRestore();
   });
 
   it("creates a checkout session for the session user", async () => {

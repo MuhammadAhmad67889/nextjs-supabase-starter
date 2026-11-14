@@ -57,11 +57,36 @@ export async function POST(request: Request) {
       );
     }
 
-    const { priceId } = await request.json();
+    // Read the body. A malformed body is the caller's mistake, not a
+    // server error, so it gets a 400 instead of falling into the 500.
+    let body: unknown;
+    try {
+      body = await request.json();
+    } catch {
+      return NextResponse.json(
+        { error: "Invalid JSON body" },
+        { status: 400 }
+      );
+    }
 
-    if (!priceId) {
+    const priceId = (body as { priceId?: unknown } | null)?.priceId;
+
+    if (typeof priceId !== "string" || priceId === "") {
       return NextResponse.json(
         { error: "priceId is required" },
+        { status: 400 }
+      );
+    }
+
+    // Only the price the app is configured to sell can be checked out.
+    // The body is client-supplied, so any other price is rejected here
+    // instead of letting a caller start checkout with any price in the
+    // Stripe account. Without a configured price there is nothing valid
+    // to buy.
+    const allowedPriceId = process.env.NEXT_PUBLIC_STRIPE_PRICE_ID;
+    if (!allowedPriceId || priceId !== allowedPriceId) {
+      return NextResponse.json(
+        { error: "priceId is not a valid plan price" },
         { status: 400 }
       );
     }
@@ -95,7 +120,9 @@ export async function POST(request: Request) {
 
     return NextResponse.json({ url: session.url });
   } catch (error) {
-    const message = error instanceof Error ? error.message : "Checkout failed";
-    return NextResponse.json({ error: message }, { status: 500 });
+    // Log the real error server-side, but never send internal details
+    // back to the caller.
+    console.error("Checkout failed:", error);
+    return NextResponse.json({ error: "Checkout failed" }, { status: 500 });
   }
 }
